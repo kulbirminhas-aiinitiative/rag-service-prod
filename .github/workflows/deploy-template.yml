@@ -1,0 +1,380 @@
+name: Unified Deployment Template
+# Reusable workflow for deploying any Maestro service to any environment
+# Single source of truth - configuration driven from deployment/config.yml
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Name of the service to deploy (e.g., llm-router, multi-agent, rag-service)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (development, demo, production)'
+        required: true
+        type: string
+      service_directory:
+        description: 'Directory containing the service code (relative to repo root)'
+        required: true
+        type: string
+    secrets:
+      SSH_KEY:
+        description: 'SSH private key for deployment server'
+        required: true
+      ANTHROPIC_API_KEY:
+        description: 'Anthropic API key (optional, service-specific)'
+        required: false
+      OPENAI_API_KEY:
+        description: 'OpenAI API key (optional, service-specific)'
+        required: false
+      GEMINI_API_KEY:
+        description: 'Gemini API key (optional, service-specific)'
+        required: false
+      POSTGRES_URL:
+        description: 'PostgreSQL connection URL (optional, service-specific)'
+        required: false
+      REDIS_URL:
+        description: 'Redis connection URL (optional, service-specific)'
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.service_name }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================
+      # 1. CHECKOUT CODE
+      # ============================================
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # ============================================
+      # 2. LOAD CONFIGURATION
+      # ============================================
+      - name: Load deployment configuration
+        id: config
+        run: |
+          # Install yq for YAML parsing
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+          # Load configuration from deployment/config.yml
+          ENV="${{ inputs.environment }}"
+          SERVICE="${{ inputs.service_name }}"
+          CONFIG_FILE="deployment/config.yml"
+
+          echo "Loading configuration for service: $SERVICE, environment: $ENV"
+
+          # Environment configuration
+          SERVER=$(yq eval ".environments.$ENV.server" $CONFIG_FILE)
+          SERVER_USER=$(yq eval ".environments.$ENV.server_user" $CONFIG_FILE)
+          REGISTRY=$(yq eval ".environments.$ENV.registry" $CONFIG_FILE)
+          CONTAINER_SUFFIX=$(yq eval ".environments.$ENV.container_suffix" $CONFIG_FILE)
+          NETWORK=$(yq eval ".environments.$ENV.network" $CONFIG_FILE)
+          ENVIRONMENT_VAR=$(yq eval ".environments.$ENV.environment_var" $CONFIG_FILE)
+          LOG_LEVEL=$(yq eval ".environments.$ENV.log_level" $CONFIG_FILE)
+
+          # Service configuration
+          IMAGE_NAME=$(yq eval ".services.$SERVICE.image_name" $CONFIG_FILE)
+          INTERNAL_PORT=$(yq eval ".services.$SERVICE.internal_port" $CONFIG_FILE)
+          EXTERNAL_PORT=$(yq eval ".services.$SERVICE.ports.$ENV" $CONFIG_FILE)
+          HEALTH_PATH=$(yq eval ".services.$SERVICE.health_check_path" $CONFIG_FILE)
+          HEALTH_EXPECTED=$(yq eval ".services.$SERVICE.health_check_expected" $CONFIG_FILE)
+          STARTUP_WAIT=$(yq eval ".services.$SERVICE.startup_wait_seconds" $CONFIG_FILE)
+
+          # Container name
+          CONTAINER_NAME="maestro-${IMAGE_NAME}${CONTAINER_SUFFIX}"
+
+          # Export configuration as outputs
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          echo "server_user=$SERVER_USER" >> $GITHUB_OUTPUT
+          echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+          echo "container_name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
+          echo "network=$NETWORK" >> $GITHUB_OUTPUT
+          echo "environment_var=$ENVIRONMENT_VAR" >> $GITHUB_OUTPUT
+          echo "log_level=$LOG_LEVEL" >> $GITHUB_OUTPUT
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "internal_port=$INTERNAL_PORT" >> $GITHUB_OUTPUT
+          echo "external_port=$EXTERNAL_PORT" >> $GITHUB_OUTPUT
+          echo "health_path=$HEALTH_PATH" >> $GITHUB_OUTPUT
+          echo "health_expected=$HEALTH_EXPECTED" >> $GITHUB_OUTPUT
+          echo "startup_wait=$STARTUP_WAIT" >> $GITHUB_OUTPUT
+
+          # Display configuration
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Deployment Configuration Loaded"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Environment:    $ENV"
+          echo "Service:        $SERVICE"
+          echo "Server:         $SERVER"
+          echo "Container:      $CONTAINER_NAME"
+          echo "Image:          $IMAGE_NAME"
+          echo "Port Mapping:   $EXTERNAL_PORT:$INTERNAL_PORT"
+          echo "Network:        $NETWORK"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ============================================
+      # 3. BUILD DOCKER IMAGE
+      # ============================================
+      - name: Build Docker image
+        run: |
+          echo "Building Docker image for ${{ inputs.service_name }}..."
+          cd ${{ inputs.service_directory }}
+
+          # Build with commit SHA tag
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          docker build -t ${{ steps.config.outputs.image_name }}:latest .
+          docker tag ${{ steps.config.outputs.image_name }}:latest \
+                     ${{ steps.config.outputs.image_name }}:v1.0.0-${COMMIT_SHA}
+
+          echo "✓ Docker image built successfully"
+          echo "  - ${{ steps.config.outputs.image_name }}:latest"
+          echo "  - ${{ steps.config.outputs.image_name }}:v1.0.0-${COMMIT_SHA}"
+
+      # ============================================
+      # 4. SETUP SSH
+      # ============================================
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ steps.config.outputs.server }} >> ~/.ssh/known_hosts
+
+          # Create SSH config
+          cat > ~/.ssh/config <<EOF
+          Host target-server
+            HostName ${{ steps.config.outputs.server }}
+            User ${{ steps.config.outputs.server_user }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+          EOF
+
+          echo "✓ SSH configured for deployment server"
+
+      # ============================================
+      # 5. PUSH TO REGISTRY
+      # ============================================
+      - name: Push image to registry
+        run: |
+          echo "Setting up SSH tunnel to registry..."
+          ssh -fN -L 26000:localhost:26000 target-server
+          sleep 5
+
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+
+          echo "Tagging images for registry..."
+          docker tag ${{ steps.config.outputs.image_name }}:latest \
+                     localhost:26000/${{ steps.config.outputs.image_name }}:latest
+          docker tag ${{ steps.config.outputs.image_name }}:v1.0.0-${COMMIT_SHA} \
+                     localhost:26000/${{ steps.config.outputs.image_name }}:v1.0.0-${COMMIT_SHA}
+
+          echo "Pushing images to registry..."
+          docker push localhost:26000/${{ steps.config.outputs.image_name }}:latest
+          docker push localhost:26000/${{ steps.config.outputs.image_name }}:v1.0.0-${COMMIT_SHA}
+
+          echo "✓ Images pushed to registry successfully"
+
+      # ============================================
+      # 6. DEPLOY TO SERVER
+      # ============================================
+      - name: Deploy to server
+        run: |
+          echo "Deploying ${{ steps.config.outputs.container_name }} to ${{ inputs.environment }}..."
+
+          # Load service configuration
+          CONFIG_FILE="deployment/config.yml"
+          SERVICE="${{ inputs.service_name }}"
+          ENV="${{ inputs.environment }}"
+
+          # Check if service needs secrets
+          NEEDS_ANTHROPIC=$(yq eval ".services.$SERVICE.environment_vars.secrets | contains([\"ANTHROPIC_API_KEY\"])" $CONFIG_FILE)
+          NEEDS_OPENAI=$(yq eval ".services.$SERVICE.environment_vars.secrets | contains([\"OPENAI_API_KEY\"])" $CONFIG_FILE)
+          NEEDS_GEMINI=$(yq eval ".services.$SERVICE.environment_vars.secrets | contains([\"GEMINI_API_KEY\"])" $CONFIG_FILE)
+          NEEDS_POSTGRES=$(yq eval ".services.$SERVICE.environment_vars.common | contains([\"POSTGRES_URL\"])" $CONFIG_FILE)
+          NEEDS_REDIS=$(yq eval ".services.$SERVICE.environment_vars.common | contains([\"REDIS_URL\"])" $CONFIG_FILE)
+
+          # Build environment variables
+          ENV_VARS="-e ENVIRONMENT=${{ steps.config.outputs.environment_var }}"
+          ENV_VARS="$ENV_VARS -e LOG_LEVEL=${{ steps.config.outputs.log_level }}"
+
+          # Add secrets if needed
+          if [ "$NEEDS_ANTHROPIC" = "true" ]; then
+            ENV_VARS="$ENV_VARS -e ANTHROPIC_API_KEY='${{ secrets.ANTHROPIC_API_KEY }}'"
+          fi
+
+          if [ "$NEEDS_OPENAI" = "true" ]; then
+            ENV_VARS="$ENV_VARS -e OPENAI_API_KEY='${{ secrets.OPENAI_API_KEY }}'"
+          fi
+
+          if [ "$NEEDS_GEMINI" = "true" ]; then
+            ENV_VARS="$ENV_VARS -e GEMINI_API_KEY='${{ secrets.GEMINI_API_KEY }}'"
+          fi
+
+          if [ "$NEEDS_POSTGRES" = "true" ]; then
+            ENV_VARS="$ENV_VARS -e POSTGRES_URL='${{ secrets.POSTGRES_URL }}'"
+          fi
+
+          if [ "$NEEDS_REDIS" = "true" ]; then
+            ENV_VARS="$ENV_VARS -e REDIS_URL='${{ secrets.REDIS_URL }}'"
+          fi
+
+          # Add service-specific environment variables
+          if [ "$SERVICE" = "multi-agent" ]; then
+            ENV_VARS="$ENV_VARS -e LLM_ROUTER_URL=http://maestro-llm-router${{ steps.config.outputs.container_suffix }}:${{ steps.config.outputs.internal_port }}"
+          fi
+
+          if [ "$SERVICE" = "rag-service" ]; then
+            ENV_VARS="$ENV_VARS -e CHROMADB_HOST=maestro-chromadb"
+          fi
+
+          if [ "$SERVICE" = "template-service" ] || [ "$SERVICE" = "quality-fabric" ]; then
+            ENV_VARS="$ENV_VARS -e POSTGRES_HOST=maestro-postgres-v2"
+            ENV_VARS="$ENV_VARS -e REDIS_HOST=maestro-redis${{ steps.config.outputs.container_suffix }}"
+          fi
+
+          # Deploy via SSH
+          ssh target-server bash << 'ENDSSH'
+            set -e
+
+            CONTAINER_NAME="${{ steps.config.outputs.container_name }}"
+            IMAGE="${{ steps.config.outputs.registry }}/${{ steps.config.outputs.image_name }}:latest"
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Deployment Steps"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # Stop and backup old container
+            if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              echo "1. Stopping existing container..."
+              docker stop ${CONTAINER_NAME} || true
+
+              echo "2. Backing up old container..."
+              docker rename ${CONTAINER_NAME} ${CONTAINER_NAME}-backup-$(date +%Y%m%d-%H%M%S) || true
+            else
+              echo "1. No existing container found (first deployment)"
+            fi
+
+            # Pull latest image
+            echo "3. Pulling latest image..."
+            docker pull ${IMAGE}
+
+            # Start new container
+            echo "4. Starting new container..."
+            docker run -d \
+              --name ${CONTAINER_NAME} \
+              --network ${{ steps.config.outputs.network }} \
+              -p ${{ steps.config.outputs.external_port }}:${{ steps.config.outputs.internal_port }} \
+              ${ENV_VARS} \
+              ${IMAGE}
+
+            echo "5. Waiting for container startup (${{ steps.config.outputs.startup_wait }}s)..."
+            sleep ${{ steps.config.outputs.startup_wait }}
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✓ Deployment completed"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ENDSSH
+
+          echo "✓ Service deployed successfully"
+
+      # ============================================
+      # 7. HEALTH CHECK
+      # ============================================
+      - name: Verify deployment
+        run: |
+          echo "Running health checks..."
+
+          MAX_RETRIES=5
+          RETRY_DELAY=5
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Health check attempt $i/$MAX_RETRIES..."
+
+            if ssh target-server "curl -sf http://localhost:${{ steps.config.outputs.external_port }}${{ steps.config.outputs.health_path }}"; then
+              echo "✓ Health check passed!"
+
+              # Check if response contains expected string
+              RESPONSE=$(ssh target-server "curl -s http://localhost:${{ steps.config.outputs.external_port }}${{ steps.config.outputs.health_path }}")
+
+              if echo "$RESPONSE" | grep -q "${{ steps.config.outputs.health_expected }}"; then
+                echo "✓ Service is healthy and responding correctly"
+                exit 0
+              else
+                echo "⚠ Service responded but health status unclear"
+                echo "Response: $RESPONSE"
+              fi
+            else
+              echo "Health check failed, retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          echo "Rolling back deployment..."
+
+          ssh target-server bash << 'ENDSSH'
+            CONTAINER_NAME="${{ steps.config.outputs.container_name }}"
+            BACKUP_CONTAINER=$(docker ps -a --format '{{.Names}}' | grep "${CONTAINER_NAME}-backup" | head -1)
+
+            if [ -n "$BACKUP_CONTAINER" ]; then
+              echo "Stopping failed container..."
+              docker stop ${CONTAINER_NAME}
+              docker rm ${CONTAINER_NAME}
+
+              echo "Restoring backup container..."
+              docker rename ${BACKUP_CONTAINER} ${CONTAINER_NAME}
+              docker start ${CONTAINER_NAME}
+
+              echo "✓ Rollback completed"
+            else
+              echo "⚠ No backup container found for rollback"
+            fi
+          ENDSSH
+
+          exit 1
+
+      # ============================================
+      # 8. CLEANUP BACKUPS
+      # ============================================
+      - name: Cleanup old backups
+        if: success()
+        run: |
+          echo "Cleaning up old backup containers..."
+
+          ssh target-server bash << 'ENDSSH'
+            CONTAINER_NAME="${{ steps.config.outputs.container_name }}"
+
+            # Keep only the most recent backup
+            docker ps -a --format '{{.Names}}' | grep "${CONTAINER_NAME}-backup" | tail -n +2 | xargs -r docker rm
+
+            echo "✓ Cleanup completed"
+          ENDSSH
+
+      # ============================================
+      # 9. DEPLOYMENT SUMMARY
+      # ============================================
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Deployment Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Service:      ${{ inputs.service_name }}"
+          echo "Environment:  ${{ inputs.environment }}"
+          echo "Container:    ${{ steps.config.outputs.container_name }}"
+          echo "Server:       ${{ steps.config.outputs.server }}"
+          echo "Port:         ${{ steps.config.outputs.external_port }}"
+          echo "Status:       ${{ job.status }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✓ Deployment successful!"
+            echo ""
+            echo "Service URL: http://${{ steps.config.outputs.server }}:${{ steps.config.outputs.external_port }}"
+            echo "Health Check: http://${{ steps.config.outputs.server }}:${{ steps.config.outputs.external_port }}${{ steps.config.outputs.health_path }}"
+          else
+            echo "❌ Deployment failed!"
+            echo "Check logs above for details"
+          fi

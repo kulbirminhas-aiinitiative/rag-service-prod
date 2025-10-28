@@ -1,18 +1,26 @@
-name: RAG Service CI/CD Pipeline
+name: RAG Service - Unified Deployment
+# Configuration-driven deployment using centralized config.yml
+# Change environment by editing deployment/config.yml
 
 on:
   push:
     branches:
-      - main
-      - develop
+      - main      # Triggers demo deployment
+      - develop   # Can trigger development deployment
   pull_request:
     branches:
       - main
   workflow_dispatch:
-
-env:
-  REGISTRY_URL: localhost:26000
-  DEMO_SERVER: 18.134.157.225
+    inputs:
+      environment:
+        description: 'Target environment (development, demo, production)'
+        required: true
+        type: choice
+        options:
+          - development
+          - demo
+          - production
+        default: 'demo'
 
 jobs:
   # ============================================================================
@@ -37,175 +45,62 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: |
-          poetry install --with dev,test
+        run: poetry install --with dev,test
         continue-on-error: true
 
       - name: Check Python syntax
-        run: |
-          find src -name "*.py" -exec python -m py_compile {} \;
+        run: find src -name "*.py" -exec python -m py_compile {} \;
         continue-on-error: true
 
       - name: Run Black (code formatting)
-        run: |
-          poetry run black --check src/ --line-length 150 || echo "Black check completed with warnings"
+        run: poetry run black --check src/ --line-length 150 || echo "Black check completed with warnings"
         continue-on-error: true
 
       - name: Run isort (import sorting)
-        run: |
-          poetry run isort --check src/ || echo "isort check completed with warnings"
+        run: poetry run isort --check src/ || echo "isort check completed with warnings"
         continue-on-error: true
 
   # ============================================================================
-  # GATE 2: Build & Push to Registry
-  # ============================================================================
-  build:
-    name: "Gate 2: Build & Push Image"
-    runs-on: ubuntu-latest
-    needs: code-quality
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Setup SSH tunnel to registry
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEMO_SSH_KEY }}" > ~/.ssh/demo_key
-          chmod 600 ~/.ssh/demo_key
-          ssh-keyscan -H ${{ env.DEMO_SERVER }} >> ~/.ssh/known_hosts
-
-          # Create SSH tunnel to access registry on demo server
-          ssh -f -N -L 26000:localhost:26000 -i ~/.ssh/demo_key ec2-user@${{ env.DEMO_SERVER }}
-
-          # Wait for tunnel to establish
-          sleep 5
-
-      - name: Build and push Docker image
-        run: |
-          COMMIT_SHA=$(git rev-parse --short HEAD)
-          VERSION="v1.0.0-${COMMIT_SHA}"
-          REGISTRY="localhost:26000"
-
-          # Build image
-          docker build \
-            -t ${REGISTRY}/rag-service:${VERSION} \
-            -t ${REGISTRY}/rag-service:latest \
-            .
-
-          # Push to registry
-          docker push ${REGISTRY}/rag-service:${VERSION}
-          docker push ${REGISTRY}/rag-service:latest
-
-          echo "IMAGE_TAG=${VERSION}" >> $GITHUB_ENV
-          echo "Pushed ${REGISTRY}/rag-service:${VERSION}"
-          echo "Pushed ${REGISTRY}/rag-service:latest"
-
-  # ============================================================================
-  # GATE 3: Deploy from Registry
+  # GATE 2 & 3: Deploy to Demo (using reusable workflow)
   # ============================================================================
   deploy-demo:
-    name: "Gate 3: Deploy to Demo"
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEMO_SSH_KEY }}" > ~/.ssh/demo_key
-          chmod 600 ~/.ssh/demo_key
-          ssh-keyscan -H ${{ env.DEMO_SERVER }} >> ~/.ssh/known_hosts
-
-      - name: Deploy on demo server
-        run: |
-          ssh -i ~/.ssh/demo_key ec2-user@${{ env.DEMO_SERVER }} << 'ENDSSH'
-            REGISTRY="localhost:26000"
-            IMAGE="${REGISTRY}/rag-service:latest"
-
-            # Pull latest image from registry
-            docker pull ${IMAGE}
-
-            # Stop old container
-            docker stop maestro-rag-service-demo 2>/dev/null || true
-            docker rm maestro-rag-service-demo 2>/dev/null || true
-
-            # Run new container
-            docker run -d \
-              --name maestro-rag-service-demo \
-              --network maestro-network \
-              -p 8403:8000 \
-              -e ENVIRONMENT=demo \
-              -e CHROMA_HOST=maestro-chromadb \
-              -e CHROMA_PORT=8000 \
-              -e ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY} \
-              ${IMAGE}
-
-            # Wait for startup
-            sleep 10
-
-            # Health check
-            curl -f http://localhost:8403/health || exit 1
-          ENDSSH
-
-      - name: Verify deployment
-        run: |
-          ssh -i ~/.ssh/demo_key ec2-user@${{ env.DEMO_SERVER }} \
-            "docker ps | grep rag-service && echo 'Deployment successful'"
+    name: "Deploy to Demo"
+    needs: code-quality
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/deploy-template.yml
+    with:
+      service_name: rag-service
+      environment: demo
+      service_directory: .
+    secrets:
+      SSH_KEY: ${{ secrets.DEMO_SSH_KEY }}
 
   # ============================================================================
-  # GATE 4: Post-Deployment Validation
+  # GATE 2 & 3: Deploy to Development (using reusable workflow)
   # ============================================================================
-  post-deployment-validation:
-    name: "Gate 4: Post-Deployment Validation"
-    runs-on: ubuntu-latest
-    needs: deploy-demo
+  deploy-development:
+    name: "Deploy to Development"
+    needs: code-quality
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/deploy-template.yml
+    with:
+      service_name: rag-service
+      environment: development
+      service_directory: .
+    secrets:
+      SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
 
-    steps:
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEMO_SSH_KEY }}" > ~/.ssh/demo_key
-          chmod 600 ~/.ssh/demo_key
-          ssh-keyscan -H ${{ env.DEMO_SERVER }} >> ~/.ssh/known_hosts
-
-      - name: Check service health
-        run: |
-          ssh -i ~/.ssh/demo_key ec2-user@${{ env.DEMO_SERVER }} << 'ENDSSH'
-            echo "Checking RAG Service health..."
-
-            # Container running
-            docker ps | grep maestro-rag-service-demo || exit 1
-
-            # Health endpoint
-            HEALTH=$(curl -sf http://localhost:8403/health | jq -r '.status' 2>/dev/null || echo "unknown")
-            if [ "$HEALTH" != "healthy" ]; then
-              echo "Health check failed: $HEALTH"
-              exit 1
-            fi
-
-            # Check ChromaDB connection
-            CHROMA_CONNECTED=$(curl -sf http://localhost:8403/health | jq -r '.chromadb_connected' 2>/dev/null || echo "false")
-            if [ "$CHROMA_CONNECTED" != "true" ]; then
-              echo "ChromaDB connection failed"
-              exit 1
-            fi
-
-            # Test collections endpoint
-            curl -sf http://localhost:8403/api/v1/collections || exit 1
-
-            echo "All post-deployment checks passed!"
-          ENDSSH
-
-      - name: Send deployment notification
-        if: success()
-        run: |
-          echo "RAG Service deployed successfully to demo server!"
-          echo "Service accessible at: http://${{ env.DEMO_SERVER }}:8403"
+  # ============================================================================
+  # Manual Deployment to Any Environment
+  # ============================================================================
+  deploy-manual:
+    name: "Manual Deploy to ${{ github.event.inputs.environment }}"
+    needs: code-quality
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/deploy-template.yml
+    with:
+      service_name: rag-service
+      environment: ${{ github.event.inputs.environment }}
+      service_directory: .
+    secrets:
+      SSH_KEY: ${{ github.event.inputs.environment == 'development' && secrets.DEV_SSH_KEY || github.event.inputs.environment == 'demo' && secrets.DEMO_SSH_KEY || secrets.PROD_SSH_KEY }}

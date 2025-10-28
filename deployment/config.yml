@@ -1,0 +1,226 @@
+# Maestro Platform - Master Deployment Configuration
+# Single source of truth for all deployment environments
+# Version: 1.0.0
+
+# ==============================================================================
+# ENVIRONMENTS
+# ==============================================================================
+# Define all target environments here. To deploy to a different environment,
+# just change the values in this section.
+
+environments:
+  # Development Environment (Local Server)
+  development:
+    name: development
+    server: localhost
+    server_user: ec2-user
+    ssh_key_secret: DEV_SSH_KEY
+    registry: localhost:26000
+    container_suffix: -dev
+    network: maestro-network
+    environment_var: development
+    log_level: DEBUG
+
+  # Demo Environment (AWS Demo Server)
+  demo:
+    name: demo
+    server: 18.134.157.225
+    server_user: ec2-user
+    ssh_key_secret: DEMO_SSH_KEY
+    registry: localhost:26000
+    container_suffix: -demo
+    network: maestro-network
+    environment_var: demo
+    log_level: INFO
+
+  # Production Environment (To be configured)
+  production:
+    name: production
+    server: TBD  # Update when production server is ready
+    server_user: ec2-user
+    ssh_key_secret: PROD_SSH_KEY
+    registry: localhost:26000
+    container_suffix: -prod
+    network: maestro-network
+    environment_var: production
+    log_level: WARNING
+
+# ==============================================================================
+# SERVICES CONFIGURATION
+# ==============================================================================
+# Define service-specific configurations. When adding a new service, add it here.
+
+services:
+  # LLM Router Service
+  llm-router:
+    image_name: llm-router
+    internal_port: 8001
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 10
+
+    # Port mappings per environment
+    ports:
+      development: 8402
+      demo: 8402
+      production: 8402
+
+    # Environment variables (common to all environments)
+    environment_vars:
+      common:
+        - ENVIRONMENT
+      # Secrets (pulled from GitHub Secrets)
+      secrets:
+        - ANTHROPIC_API_KEY
+        - OPENAI_API_KEY
+        - GEMINI_API_KEY
+
+  # Multi-Agent Service
+  multi-agent:
+    image_name: multi-agent
+    internal_port: 8000
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 10
+
+    ports:
+      development: 8404
+      demo: 8404
+      production: 8404
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - LLM_ROUTER_URL
+      secrets: []
+
+  # RAG Service
+  rag-service:
+    image_name: rag-service
+    internal_port: 8000
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 10
+
+    ports:
+      development: 8403
+      demo: 8403
+      production: 8403
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - CHROMADB_HOST
+      secrets: []
+
+  # Gateway Service
+  gateway:
+    image_name: gateway
+    internal_port: 8080
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 5
+
+    ports:
+      development: 8080
+      demo: 8080
+      production: 8080
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+      secrets: []
+
+  # Template Service
+  template-service:
+    image_name: template-service
+    internal_port: 9600
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 10
+
+    ports:
+      development: 11030
+      demo: 9600
+      production: 9600
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - POSTGRES_URL
+        - REDIS_URL
+      secrets: []
+
+  # Quality Fabric
+  quality-fabric:
+    image_name: quality-fabric
+    internal_port: 8000
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 15
+
+    ports:
+      development: 11000
+      demo: 8000
+      production: 8000
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - POSTGRES_HOST
+        - REDIS_HOST
+      secrets: []
+
+# ==============================================================================
+# DEPLOYMENT STRATEGY
+# ==============================================================================
+
+deployment:
+  # Git branch to environment mapping
+  branch_mappings:
+    develop: development
+    main: demo
+    release/*: production
+
+  # Rollback strategy
+  rollback:
+    enabled: true
+    keep_previous_container: true
+    auto_rollback_on_failure: true
+
+  # Health check retry configuration
+  health_check:
+    max_retries: 5
+    retry_delay_seconds: 5
+    timeout_seconds: 30
+
+# ==============================================================================
+# NOTIFICATIONS
+# ==============================================================================
+
+notifications:
+  enabled: false
+  slack_webhook: ""  # Add Slack webhook URL if notifications needed
+  discord_webhook: ""  # Add Discord webhook URL if notifications needed
+
+# ==============================================================================
+# USAGE INSTRUCTIONS
+# ==============================================================================
+#
+# TO DEPLOY TO A DIFFERENT ENVIRONMENT:
+# 1. Update the 'server' field in the environments section above
+# 2. Commit and push changes
+# 3. CI/CD will automatically use the new configuration
+#
+# TO ADD A NEW SERVICE:
+# 1. Add service definition in the 'services' section
+# 2. Define ports for each environment
+# 3. List required environment variables and secrets
+# 4. Create GitHub Actions workflow that references this config
+#
+# TO ADD A NEW ENVIRONMENT:
+# 1. Add environment definition in the 'environments' section
+# 2. Add port mappings for all services
+# 3. Configure GitHub Secrets for the new environment
+# 4. Update branch mappings if needed
+#
