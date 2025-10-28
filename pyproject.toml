@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "rag-service"
+version = "1.0.0"
+description = "RAG document processing and semantic search service"
+authors = ["MAESTRO Team"]
+readme = "README.md"
+packages = [{include = "rag_service", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.109.0"
+uvicorn = {extras = ["standard"], version = "^0.27.0"}
+chromadb = ">=0.5.23"
+torch = {version = "^2.0.0", source = "pytorch-cpu"}
+sentence-transformers = "^2.3.1"
+pydantic = "^2.5.0"
+pyyaml = "^6.0"
+redis = "^5.0.0"
+httpx = "^0.27.0"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.8.0"
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 120
+target-version = ['py311']
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
