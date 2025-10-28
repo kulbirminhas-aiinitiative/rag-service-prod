@@ -171,6 +171,56 @@ services:
         - REDIS_HOST
       secrets: []
 
+  # ============================================================================
+  # PLACEHOLDER SERVICES (Not yet deployed - infrastructure ready)
+  # ============================================================================
+
+  # Maestro Frontend (PLACEHOLDER)
+  maestro-frontend:
+    image_name: maestro-frontend
+    internal_port: 3000
+    health_check_path: /
+    health_check_expected: "200"
+    startup_wait_seconds: 15
+
+    ports:
+      development: 3000
+      demo: 3000
+      production: 3000
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - NEXT_PUBLIC_API_URL
+        - NEXT_PUBLIC_LLM_ROUTER_URL
+        - NEXT_PUBLIC_GATEWAY_URL
+      secrets: []
+
+  # Maestro Engine (PLACEHOLDER)
+  maestro-engine:
+    image_name: maestro-engine
+    internal_port: 8500
+    health_check_path: /health
+    health_check_expected: "healthy"
+    startup_wait_seconds: 20
+
+    ports:
+      development: 8500
+      demo: 8500
+      production: 8500
+
+    environment_vars:
+      common:
+        - ENVIRONMENT
+        - POSTGRES_HOST
+        - POSTGRES_PORT
+        - REDIS_HOST
+        - REDIS_PORT
+        - LLM_ROUTER_URL
+      secrets:
+        - POSTGRES_PASSWORD
+        - REDIS_PASSWORD
+
 # ==============================================================================
 # DEPLOYMENT STRATEGY
 # ==============================================================================
